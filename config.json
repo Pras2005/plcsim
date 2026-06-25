@@ -1,0 +1,81 @@
+{
+  "plc": {
+    "enabled": false,
+    "ip": "192.168.1.5",
+    "port": 502,
+    "device_id": 1
+  },
+  "simulator": {
+    "machine_count": 1,
+    "update_interval": 1.0,
+    "web_port": 8080,
+    "register_block_size": 10
+  },
+  "tags": [
+    {
+      "name": "status",
+      "label": "Status",
+      "type": "bitfield",
+      "register_offset": 0,
+      "bits": {
+        "power": 0,
+        "auto": 1,
+        "running": 2,
+        "estop": 3,
+        "alarm": 4,
+        "door_open": 5
+      }
+    },
+    {
+      "name": "speed",
+      "label": "Speed",
+      "type": "analog",
+      "register_offset": 1,
+      "unit": "RPM",
+      "min": 0,
+      "max": 100,
+      "warn_high": 85,
+      "alarm_high": 95
+    },
+    {
+      "name": "temperature",
+      "label": "Temperature",
+      "type": "analog",
+      "register_offset": 2,
+      "unit": "°C",
+      "min": 0,
+      "max": 100,
+      "warn_high": 55,
+      "alarm_high": 70
+    },
+    {
+      "name": "vibration",
+      "label": "Vibration",
+      "type": "analog",
+      "register_offset": 3,
+      "unit": "mm/s",
+      "min": 0,
+      "max": 50,
+      "warn_high": 30,
+      "alarm_high": 40
+    },
+    {
+      "name": "load",
+      "label": "Load",
+      "type": "analog",
+      "register_offset": 4,
+      "unit": "%",
+      "min": 0,
+      "max": 100,
+      "warn_high": 85,
+      "alarm_high": 95
+    },
+    {
+      "name": "cycle_count",
+      "label": "Cycle Count",
+      "type": "counter",
+      "register_offset": 5,
+      "unit": "cycles"
+    }
+  ]
+}

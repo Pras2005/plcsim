@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Industrial PLC Simulator Dashboard — real-time SCADA/HMI monitoring with live machine data, SVG gauges, and WebSocket connectivity.">
+    <title>PLC Simulator Dashboard</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+
+    <!-- ─── Top Bar ─────────────────────────────────────────── -->
+    <header id="top-bar" class="top-bar">
+        <div class="top-bar__brand">
+            <svg class="top-bar__icon" viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="2" y="3" width="20" height="18" rx="3"/>
+                <line x1="6" y1="8" x2="6" y2="8.01" stroke-width="2.5"/>
+                <line x1="10" y1="8" x2="10" y2="8.01" stroke-width="2.5"/>
+                <line x1="14" y1="8" x2="14" y2="8.01" stroke-width="2.5"/>
+                <line x1="18" y1="8" x2="18" y2="8.01" stroke-width="2.5"/>
+                <line x1="6" y1="14" x2="18" y2="14"/>
+                <line x1="6" y1="17" x2="14" y2="17"/>
+            </svg>
+            <h1 class="top-bar__title">PLC Simulator</h1>
+        </div>
+
+        <div id="connection-status" class="top-bar__status">
+            <span id="connection-dot" class="status-dot status-dot--disconnected"></span>
+            <span id="connection-label" class="status-label">Disconnected</span>
+        </div>
+
+        <button id="settings-toggle" class="top-bar__settings" aria-label="Open settings">
+            <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="3"/>
+                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+            </svg>
+        </button>
+    </header>
+
+    <!-- ─── Settings Panel Overlay ──────────────────────────── -->
+    <div id="settings-overlay" class="settings-overlay" hidden></div>
+
+    <!-- ─── Settings Panel ──────────────────────────────────── -->
+    <aside id="settings-panel" class="settings-panel" aria-label="Settings">
+        <div class="settings-panel__header">
+            <h2 class="settings-panel__title">Settings</h2>
+            <button id="settings-close" class="settings-panel__close" aria-label="Close settings">
+                <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+            </button>
+        </div>
+
+        <form id="settings-form" class="settings-panel__body" autocomplete="off">
+            <!-- Machine count -->
+            <div class="form-group">
+                <label class="form-label" for="cfg-machine-count">Number of Machines</label>
+                <input class="form-input" type="number" id="cfg-machine-count" min="1" max="20" value="1">
+            </div>
+
+            <!-- Update interval -->
+            <div class="form-group">
+                <label class="form-label" for="cfg-update-interval">Update Interval (s)</label>
+                <input class="form-input" type="number" id="cfg-update-interval" min="0.1" max="10" step="0.1" value="1.0">
+            </div>
+
+            <!-- PLC toggle -->
+            <div class="form-group form-group--row">
+                <label class="form-label" for="cfg-plc-enabled">PLC Connection</label>
+                <label class="toggle" id="toggle-plc-enabled">
+                    <input type="checkbox" id="cfg-plc-enabled">
+                    <span class="toggle__slider"></span>
+                </label>
+            </div>
+
+            <!-- PLC connection fields (hidden when PLC disabled) -->
+            <div id="plc-fields" class="plc-fields" hidden>
+                <div class="form-group">
+                    <label class="form-label" for="cfg-plc-ip">PLC IP Address</label>
+                    <input class="form-input" type="text" id="cfg-plc-ip" placeholder="192.168.1.5">
+                </div>
+                <div class="form-group">
+                    <label class="form-label" for="cfg-plc-port">Port</label>
+                    <input class="form-input" type="number" id="cfg-plc-port" min="1" max="65535" value="502">
+                </div>
+                <div class="form-group">
+                    <label class="form-label" for="cfg-plc-device-id">Device ID</label>
+                    <input class="form-input" type="number" id="cfg-plc-device-id" min="0" max="255" value="1">
+                </div>
+            </div>
+
+            <button type="submit" id="settings-apply" class="btn btn--apply">Apply</button>
+        </form>
+    </aside>
+
+    <!-- ─── Main Content ────────────────────────────────────── -->
+    <main id="main-content" class="main-content">
+        <div id="machine-grid" class="machine-grid">
+            <!-- Machine cards are injected here by JS -->
+        </div>
+    </main>
+
+    <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+    <script src="/static/js/app.js"></script>
+</body>
+</html>
