@@ -670,6 +670,30 @@ class PLCSimulatorApp(ctk.CTk):
         self.interval_var.set(interval)
 
         self._sync_machines()
+
+        # Clear Modbus registers for any inactive machine slots (from the new count up to 20) on the PLC
+        if config["plc"]["enabled"]:
+            def clear_inactive_registers():
+                try:
+                    from pymodbus.client import ModbusTcpClient
+                    ip = config["plc"]["ip"]
+                    port = config["plc"]["port"]
+                    client = ModbusTcpClient(ip, port=port)
+                    if client.connect():
+                        block = config["simulator"].get("register_block_size", 10)
+                        dev = config["plc"].get("device_id", 1)
+                        for m_id in range(count, 20):
+                            base = m_id * block
+                            try:
+                                write_holding_registers_helper(client, base, [0]*6, dev)
+                            except Exception:
+                                pass
+                        client.close()
+                except Exception as e:
+                    print(f"[WARN] Failed to clear inactive registers: {e}")
+
+            threading.Thread(target=clear_inactive_registers, daemon=True).start()
+
         self._check_and_start_modbus_server()
 
         # Disconnect client to force reconnect on next tick

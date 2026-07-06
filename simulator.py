@@ -260,6 +260,20 @@ def sync_machines(target_count: int):
             for i in range(current, target_count):
                 machines.append(Machine(i))
         elif target_count < current:
+            # Clear Modbus registers for the removed machines
+            plc_cfg = config.get("plc", {})
+            if plc_cfg.get("enabled", False):
+                client = get_modbus_client()
+                if client is not None:
+                    block = config["simulator"].get("register_block_size", 10)
+                    dev = plc_cfg.get("device_id", 1)
+                    # Clear registers for removed machine IDs
+                    for m_id in range(target_count, current):
+                        base = m_id * block
+                        try:
+                            write_holding_registers_helper(client, base, [0]*6, dev)
+                        except Exception:
+                            pass
             del machines[target_count:]
 
 
