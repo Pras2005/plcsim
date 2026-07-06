@@ -13,6 +13,7 @@ import random
 import json
 import os
 import threading
+import queue
 from datetime import datetime
 
 # ─── Configuration ──────────────────────────────────────────────────────────
@@ -52,6 +53,32 @@ def load_config() -> dict:
         return cfg
     except (FileNotFoundError, json.JSONDecodeError):
         return dict(DEFAULT_CONFIG)
+
+
+def save_config(cfg: dict):
+    try:
+        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, indent=2)
+    except Exception as e:
+        print(f"[WARN] Failed to save config to disk: {e}")
+
+
+def write_holding_registers_helper(client, address, values, device_id):
+    attempts = (
+        {"device_id": device_id},
+        {"slave": device_id},
+        {"unit": device_id},
+        {},
+    )
+    last_error = None
+    for kwargs in attempts:
+        try:
+            return client.write_registers(address=address, values=values, **kwargs)
+        except TypeError as exc:
+            last_error = exc
+    if last_error:
+        raise last_error
+    raise RuntimeError("Could not write registers")
 
 
 config = load_config()
@@ -94,13 +121,29 @@ class Machine:
         self.cycle = machine_id * 7  # offset so machines don't sync
         self.cycle_count = 0
         self.data: dict = {}
+        self.override_state = "auto"
 
     def tick(self) -> dict:
         power = 1
         auto = 1
-        running = 1 if (self.cycle % 30) < 20 else 0
-        estop = 0
-        alarm = 1 if random.randint(1, 100) <= 3 else 0
+        
+        if self.override_state == "active":
+            running = 1
+            estop = 0
+            alarm = 0
+        elif self.override_state == "stopped":
+            running = 0
+            estop = 1
+            alarm = 0
+        elif self.override_state == "idle":
+            running = 0
+            estop = 0
+            alarm = 0
+        else: # auto
+            running = 1 if (self.cycle % 30) < 20 else 0
+            estop = 0
+            alarm = 1 if random.randint(1, 100) <= 3 else 0
+
         door = 0
 
         status_raw = (
@@ -113,11 +156,13 @@ class Machine:
             temperature = 45 + random.randint(-2, 2)
             vibration = 20 + random.randint(-3, 3)
             load = 75 + random.randint(-5, 5)
+            if self.cycle % 30 == 0:
+                self.cycle_count += 1
         else:
-            speed, temperature, vibration, load = 0, 35, 3, 0
-
-        if self.cycle % 30 == 0:
-            self.cycle_count += 1
+            speed = 0
+            temperature = 35 + random.randint(-1, 1)
+            vibration = 2 + random.randint(-1, 1)
+            load = 10 + random.randint(-1, 1)  # ~10% standby load when machine is powered but idle
 
         self.cycle += 1
 
@@ -253,17 +298,18 @@ class MachineCard(ctk.CTkFrame):
         "load":        ("Load",      "%",    0, 100, 85, 95),
     }
 
-    def __init__(self, parent, machine_id, name, tag_config):
+    def __init__(self, parent, machine_id, machine, tag_config):
         super().__init__(
             parent, fg_color=C["card"],
             border_color=C["card_border"], border_width=1,
             corner_radius=12,
         )
         self.machine_id = machine_id
+        self.machine = machine
         self.tag_config = tag_config
         self.leds: dict[str, LEDWidget] = {}
         self.gauges: dict[str, GaugeWidget] = {}
-        self._build(name)
+        self._build(machine.name)
 
     def _tag_meta(self, name):
         """Get tag config with fallback defaults."""
@@ -290,6 +336,25 @@ class MachineCard(ctk.CTkFrame):
         self.overall_cv.pack(side="right")
         self.overall_dot = self.overall_cv.create_oval(2, 2, 14, 14,
                                                         fill=C["idle"], outline="")
+
+        # ── State Control segmented button ──
+        ctrl_frame = ctk.CTkFrame(self, fg_color="transparent")
+        ctrl_frame.pack(fill="x", padx=12, pady=(0, 8))
+        
+        self.state_var = tk.StringVar(value="Auto")
+        self.state_btn = ctk.CTkSegmentedButton(
+            ctrl_frame,
+            values=["Auto", "Active", "Stopped", "Idle"],
+            variable=self.state_var,
+            command=self._on_state_change,
+            height=26,
+            font=(FONT_MAIN, 10, "bold"),
+            fg_color=C["led_row"],
+            selected_color=C["primary"],
+            unselected_color=C["led_row"],
+            text_color=C["text_dim"]
+        )
+        self.state_btn.pack(fill="x", expand=True)
 
         # ── Status LEDs row ──
         led_frame = tk.Frame(self, bg=C["led_row"],
@@ -342,6 +407,9 @@ class MachineCard(ctk.CTkFrame):
         )
         self.cycle_label.pack(side="right")
 
+    def _on_state_change(self, value):
+        self.machine.override_state = value.lower()
+
     # ── Update ──
 
     def update_data(self, data: dict):
@@ -387,8 +455,8 @@ class PLCSimulatorApp(ctk.CTk):
         super().__init__()
 
         self.title("PLC Simulator")
-        self.geometry("1100x780")
-        self.minsize(600, 500)
+        self.geometry("1100x620")
+        self.minsize(600, 450)
         self.configure(fg_color=C["bg"])
 
         self.machines: list[Machine] = []
@@ -397,9 +465,12 @@ class PLCSimulatorApp(ctk.CTk):
         self.tag_config = config.get("tags", [])
         self._tick_count = 0
         self._last_cols = 0
+        self.log_queue = queue.Queue()
 
         self._build_ui()
         self._sync_machines()
+        self._check_and_start_modbus_server()
+        self._process_log_queue()
         self._tick()
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -427,7 +498,7 @@ class PLCSimulatorApp(ctk.CTk):
         # Machines
         ctk.CTkLabel(ctrls, text="Machines:", font=(FONT_MAIN, 11),
                      text_color=C["text_dim"]).pack(side="left", padx=(0, 4))
-        self.machine_count_var = tk.IntVar(value=config["simulator"]["machine_count"])
+        self.machine_count_var = tk.StringVar(value=str(config["simulator"]["machine_count"]))
         ctk.CTkEntry(ctrls, width=48, font=(FONT_MONO, 12),
                      textvariable=self.machine_count_var,
                      fg_color=C["input"], border_color=C["card_border"],
@@ -436,13 +507,33 @@ class PLCSimulatorApp(ctk.CTk):
         # Interval
         ctk.CTkLabel(ctrls, text="Interval:", font=(FONT_MAIN, 11),
                      text_color=C["text_dim"]).pack(side="left", padx=(0, 4))
-        self.interval_var = tk.DoubleVar(value=config["simulator"]["update_interval"])
+        self.interval_var = tk.StringVar(value=str(config["simulator"]["update_interval"]))
         ctk.CTkEntry(ctrls, width=48, font=(FONT_MONO, 12),
                      textvariable=self.interval_var,
                      fg_color=C["input"], border_color=C["card_border"],
                      justify="center").pack(side="left")
         ctk.CTkLabel(ctrls, text="s", font=(FONT_MAIN, 11),
                      text_color=C["text_dark"]).pack(side="left", padx=(2, 14))
+
+        # Connection Profile
+        ctk.CTkLabel(ctrls, text="Mode:", font=(FONT_MAIN, 11),
+                     text_color=C["text_dim"]).pack(side="left", padx=(0, 4))
+        self.profile_var = tk.StringVar(value="Localhost Dev" if config["plc"]["ip"] in ("127.0.0.1", "localhost") else "Router Setup")
+        self.profile_menu = ctk.CTkOptionMenu(
+            ctrls,
+            values=["Localhost Dev", "Router Setup"],
+            variable=self.profile_var,
+            width=115,
+            font=(FONT_MAIN, 11),
+            fg_color=C["input"],
+            button_color=C["card_border"],
+            button_hover_color=C["text_dark"],
+            dropdown_fg_color=C["card"],
+            dropdown_hover_color=C["input"],
+            dropdown_text_color=C["text"],
+            command=self._on_profile_change
+        )
+        self.profile_menu.pack(side="left", padx=(0, 14))
 
         # PLC toggle
         self.plc_var = tk.BooleanVar(value=config["plc"]["enabled"])
@@ -459,42 +550,68 @@ class PLCSimulatorApp(ctk.CTk):
                       hover_color="#33ddff",
                       command=self._apply_config).pack(side="left")
 
+        # Logs toggle
+        self.logs_visible = False
+        self.logs_btn = ctk.CTkButton(
+            ctrls, text="Show Logs", width=85,
+            font=(FONT_MAIN, 11, "bold"),
+            fg_color=C["card_border"], text_color=C["text_dim"],
+            hover_color=C["text_dark"],
+            command=self._toggle_logs
+        )
+        self.logs_btn.pack(side="left", padx=(14, 0))
+
         # Separator
         ctk.CTkFrame(self, fg_color=C["card_border"], height=1,
                      corner_radius=0).pack(fill="x")
 
-        # ── Machine Grid (scrollable) ──
-        self.scroll = ctk.CTkScrollableFrame(self, fg_color=C["bg"],
-                                              scrollbar_button_color=C["card_border"],
-                                              scrollbar_button_hover_color=C["text_dark"])
-        self.scroll.pack(fill="both", expand=True, padx=10, pady=10)
-        self.scroll.bind("<Configure>", self._on_resize)
-
         # ── Console (bottom) ──
-        console_wrap = ctk.CTkFrame(self, fg_color=C["toolbar"], height=90,
-                                     corner_radius=0)
-        console_wrap.pack(fill="x")
-        console_wrap.pack_propagate(False)
+        self.console_wrap = ctk.CTkFrame(self, fg_color=C["toolbar"], height=90,
+                                          corner_radius=0)
+        # Hidden by default to maximize machine grid area
+        self.console_wrap.pack_propagate(False)
 
         self.console = ctk.CTkTextbox(
-            console_wrap, font=(FONT_MONO, 10),
+            self.console_wrap, font=(FONT_MONO, 10),
             fg_color=C["toolbar"], text_color=C["text_dim"],
             height=80, wrap="none", activate_scrollbars=True,
             scrollbar_button_color=C["card_border"],
         )
         self.console.pack(fill="both", expand=True, padx=8, pady=4)
 
+        # ── Machine Grid (scrollable) ──
+        self.scroll = ctk.CTkScrollableFrame(self, fg_color=C["bg"],
+                                              scrollbar_button_color=C["primary"],
+                                              scrollbar_button_hover_color=C["success"])
+        self.scroll.pack(fill="both", expand=True, padx=10, pady=10)
+        self.scroll._parent_canvas.bind("<Configure>", self._on_resize)
+
     # ── Machine Management ──
+
+    def _bind_mousewheel_recursive(self, widget, callback):
+        try:
+            widget.bind("<MouseWheel>", callback, add="+")
+        except (NotImplementedError, AttributeError, tk.TclError):
+            pass
+        for child in widget.winfo_children():
+            self._bind_mousewheel_recursive(child, callback)
 
     def _sync_machines(self):
         target = config["simulator"]["machine_count"]
+
+        def on_scroll(event):
+            try:
+                self.scroll._parent_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+            except Exception:
+                pass
 
         while len(self.machines) < target:
             mid = len(self.machines)
             m = Machine(mid)
             self.machines.append(m)
-            card = MachineCard(self.scroll, mid, m.name, self.tag_config)
+            card = MachineCard(self.scroll, mid, m, self.tag_config)
             self.cards.append(card)
+            self._bind_mousewheel_recursive(card, on_scroll)
 
         while len(self.machines) > target:
             self.machines.pop()
@@ -504,17 +621,22 @@ class PLCSimulatorApp(ctk.CTk):
         self._log(f"Running {len(self.machines)} machine(s)")
 
     def _on_resize(self, event=None):
-        w = self.scroll.winfo_width()
-        cols = max(1, w // 340)
+        w = self.scroll._parent_canvas.winfo_width()
+        cols = max(1, w // 320)
         if cols != self._last_cols:
             self._last_cols = cols
             self._layout_cards(cols)
 
     def _layout_cards(self, cols=None):
         if cols is None:
-            cols = max(1, self.scroll.winfo_width() // 340)
+            cols = max(1, self.scroll._parent_canvas.winfo_width() // 320)
             if cols < 1:
                 cols = 1
+        
+        # Reset grid weights of all potential columns (up to 20) to prevent empty ghost columns on resize!
+        for c in range(20):
+            self.scroll.grid_columnconfigure(c, weight=0)
+
         for i, card in enumerate(self.cards):
             card.grid(row=i // cols, column=i % cols,
                       padx=8, pady=8, sticky="nsew")
@@ -537,12 +659,49 @@ class PLCSimulatorApp(ctk.CTk):
         config["simulator"]["update_interval"] = interval
         config["plc"]["enabled"] = self.plc_var.get()
 
+        # Update profile dropdown if needed
+        profile = "Localhost Dev" if config["plc"]["ip"] in ("127.0.0.1", "localhost") else "Router Setup"
+        self.profile_var.set(profile)
+
+        # Save config to disk
+        save_config(config)
+
         self.machine_count_var.set(count)
         self.interval_var.set(interval)
 
         self._sync_machines()
+        self._check_and_start_modbus_server()
+
+        # Disconnect client to force reconnect on next tick
+        if self.modbus_client:
+            try:
+                self.modbus_client.close()
+            except Exception:
+                pass
+            self.modbus_client = None
+
         self._log(f"Config: {count} machine(s), {interval}s interval, "
                   f"PLC {'ON' if self.plc_var.get() else 'OFF'}")
+
+    def _process_log_queue(self):
+        try:
+            while True:
+                msg = self.log_queue.get_nowait()
+                self._log(msg)
+        except queue.Empty:
+            pass
+        self.after(100, self._process_log_queue)
+
+    def _toggle_logs(self):
+        self.logs_visible = not self.logs_visible
+        if self.logs_visible:
+            self.scroll.pack_forget()
+            self.console_wrap.pack(side="bottom", fill="x")
+            self.scroll.pack(fill="both", expand=True, padx=10, pady=10)
+            self.logs_btn.configure(text="Hide Logs", fg_color=C["primary"], text_color="#000")
+        else:
+            self.console_wrap.pack_forget()
+            self.logs_btn.configure(text="Show Logs", fg_color=C["card_border"], text_color=C["text_dim"])
 
     # ── Simulation Tick ──
 
@@ -590,17 +749,13 @@ class PLCSimulatorApp(ctk.CTk):
                 port = config["plc"]["port"]
                 self.modbus_client = ModbusTcpClient(ip, port=port)
                 if not self.modbus_client.connect():
-                    self._log(f"⚠ Modbus connect failed → {ip}:{port}")
+                    self._log(f"⚠ Modbus connect failed → {ip}:{port} (retrying...)")
                     self.modbus_client = None
-                    config["plc"]["enabled"] = False
-                    self.plc_var.set(False)
                     return
                 self._log(f"✅ Modbus connected → {ip}:{port}")
             except Exception as e:
-                self._log(f"⚠ Modbus error: {e}")
+                self._log(f"⚠ Modbus connection error: {e} (retrying...)")
                 self.modbus_client = None
-                config["plc"]["enabled"] = False
-                self.plc_var.set(False)
                 return
         try:
             block = config["simulator"].get("register_block_size", 10)
@@ -611,9 +766,82 @@ class PLCSimulatorApp(ctk.CTk):
                 data["temperature"], data["vibration"],
                 data["load"], data["cycle_count"],
             ]
-            self.modbus_client.write_registers(address=base, values=vals, slave=dev)
+            write_holding_registers_helper(self.modbus_client, base, vals, dev)
         except Exception as e:
-            self._log(f"⚠ Modbus write [{machine.name}]: {e}")
+            self._log(f"⚠ Modbus write [{machine.name}] failed: {e}. Resetting connection.")
+            try:
+                self.modbus_client.close()
+            except Exception:
+                pass
+            self.modbus_client = None
+
+    def _check_and_start_modbus_server(self):
+        enabled = config["plc"]["enabled"]
+        ip = config["plc"]["ip"]
+        port = config["plc"]["port"]
+        
+        is_local = ip in ("127.0.0.1", "localhost", "0.0.0.0")
+        if not (enabled and is_local):
+            return
+            
+        current_addr = (ip, port)
+        if getattr(self, "_modbus_server_running_on", None) == current_addr:
+            return
+            
+        if getattr(self, "_modbus_server_running_on", None) is not None:
+            self._log(f"⚠ Server already running on {self._modbus_server_running_on}. Restart app to change port/IP.")
+            return
+
+        try:
+            from pymodbus.server import StartTcpServer
+            from pymodbus.datastore.context import SimDevice, DataType
+            from pymodbus.simulator.simdata import SimData
+        except ImportError as e:
+            self._log(f"⚠ Cannot import pymodbus server: {e}")
+            return
+            
+        simdata = SimData(address=0, count=1000, datatype=DataType.REGISTERS, values=[0]*1000)
+        device = SimDevice(id=0, simdata=simdata)
+        
+        def run_server():
+            self.log_queue.put(f"⚙ Starting local Modbus server on {ip}:{port}")
+            self._modbus_server_running_on = current_addr
+            try:
+                StartTcpServer(device, address=(ip, port))
+            except Exception as e:
+                self.log_queue.put(f"⚠ Local Modbus server failed: {e}")
+                self._modbus_server_running_on = None
+                
+        t = threading.Thread(target=run_server, daemon=True)
+        t.start()
+
+    def _on_profile_change(self, value):
+        if value == "Localhost Dev":
+            config["plc"]["ip"] = "127.0.0.1"
+            config["plc"]["port"] = 5020
+            config["plc"]["enabled"] = True
+            self.plc_var.set(True)
+        else:
+            config["plc"]["ip"] = "192.168.1.5"
+            config["plc"]["port"] = 502
+            config["plc"]["enabled"] = True
+            self.plc_var.set(True)
+            
+        # Save config to disk
+        save_config(config)
+        
+        # Check and start Modbus server if localhost
+        self._check_and_start_modbus_server()
+        
+        # Disconnect client to force reconnect on next tick
+        if self.modbus_client:
+            try:
+                self.modbus_client.close()
+            except Exception:
+                pass
+            self.modbus_client = None
+            
+        self._log(f"Switched connection profile to: {value} ({config['plc']['ip']}:{config['plc']['port']})")
 
     # ── Console ──
 

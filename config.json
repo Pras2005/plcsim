@@ -1,12 +1,12 @@
 {
   "plc": {
-    "enabled": false,
-    "ip": "192.168.1.5",
-    "port": 502,
+    "enabled": true,
+    "ip": "127.0.0.1",
+    "port": 5020,
     "device_id": 1
   },
   "simulator": {
-    "machine_count": 1,
+    "machine_count": 6,
     "update_interval": 1.0,
     "web_port": 8080,
     "register_block_size": 10
@@ -42,7 +42,7 @@
       "label": "Temperature",
       "type": "analog",
       "register_offset": 2,
-      "unit": "°C",
+      "unit": "\u00c2\u00b0C",
       "min": 0,
       "max": 100,
       "warn_high": 55,

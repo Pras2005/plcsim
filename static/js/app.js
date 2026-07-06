@@ -22,6 +22,7 @@
     const cfgMachineCount   = document.getElementById('cfg-machine-count');
     const cfgUpdateInterval = document.getElementById('cfg-update-interval');
     const cfgPlcEnabled     = document.getElementById('cfg-plc-enabled');
+    const cfgPlcProfile     = document.getElementById('cfg-plc-profile');
     const cfgPlcIp          = document.getElementById('cfg-plc-ip');
     const cfgPlcPort        = document.getElementById('cfg-plc-port');
     const cfgPlcDeviceId    = document.getElementById('cfg-plc-device-id');
@@ -46,6 +47,17 @@
 
     cfgPlcEnabled.addEventListener('change', () => {
         plcFields.hidden = !cfgPlcEnabled.checked;
+    });
+
+    cfgPlcProfile.addEventListener('change', () => {
+        const val = cfgPlcProfile.value;
+        if (val === 'localhost') {
+            cfgPlcIp.value = '127.0.0.1';
+            cfgPlcPort.value = 5020;
+        } else if (val === 'router') {
+            cfgPlcIp.value = '192.168.1.5';
+            cfgPlcPort.value = 502;
+        }
     });
 
     settingsForm.addEventListener('submit', (e) => {
@@ -178,6 +190,14 @@
                 <span class="machine-card__name">${machine.name}</span>
                 <span class="machine-card__overall-led" id="overall-led-${mid}"></span>
             </div>
+            <div style="padding: 0 16px 8px 16px;">
+                <select class="machine-state-select" id="state-select-${mid}" data-mid="${mid}" style="width: 100%; background: #0c1424; color: #e2e8f0; border: 1px solid #1e293b; border-radius: 4px; padding: 6px; font-size: 11px; font-weight: bold; cursor: pointer; font-family: inherit;">
+                    <option value="auto">Simulation (Auto)</option>
+                    <option value="active">Force Active</option>
+                    <option value="stopped">Force Stopped</option>
+                    <option value="idle">Force Idle</option>
+                </select>
+            </div>
             <div class="status-bits">${statusBitsHTML}</div>
             <div class="gauges-grid">${gaugesHTML}</div>
             <div class="cycle-counter">
@@ -226,6 +246,16 @@
                 const newCard = tempDiv.firstElementChild;
                 newCard.style.animationDelay = `${idx * 0.06}s`;
                 machineGrid.appendChild(newCard);
+
+                // add event listener to the state selector
+                const selectEl = document.getElementById(`state-select-${machine.id}`);
+                if (selectEl) {
+                    selectEl.addEventListener('change', (e) => {
+                        const mid = parseInt(e.target.getAttribute('data-mid'), 10);
+                        const state = e.target.value;
+                        socket.emit('set_machine_state', { machine_id: mid, state: state });
+                    });
+                }
             }
             updateCard(machine);
         });
@@ -238,6 +268,12 @@
         const mid = machine.id;
         const tags = machine.tags;
         const status = tags.status || {};
+
+        // update dropdown selection if it's different from current
+        const selectEl = document.getElementById(`state-select-${mid}`);
+        if (selectEl && selectEl.value !== machine.override_state) {
+            selectEl.value = machine.override_state || 'auto';
+        }
 
         // Overall LED
         const overallLed = document.getElementById(`overall-led-${mid}`);
@@ -339,6 +375,15 @@
         cfgPlcPort.value        = data.plc_port  ?? 502;
         cfgPlcDeviceId.value    = data.plc_device_id ?? 1;
         plcFields.hidden        = !cfgPlcEnabled.checked;
+
+        // update dropdown selection
+        if (cfgPlcIp.value === '127.0.0.1' && cfgPlcPort.value == 5020) {
+            cfgPlcProfile.value = 'localhost';
+        } else if (cfgPlcIp.value === '192.168.1.5' && cfgPlcPort.value == 502) {
+            cfgPlcProfile.value = 'router';
+        } else {
+            cfgPlcProfile.value = 'custom';
+        }
     });
 
     socket.on('machine_data', (data) => {

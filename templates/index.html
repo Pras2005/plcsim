@@ -77,6 +77,14 @@
             <!-- PLC connection fields (hidden when PLC disabled) -->
             <div id="plc-fields" class="plc-fields" hidden>
                 <div class="form-group">
+                    <label class="form-label" for="cfg-plc-profile">Connection Mode</label>
+                    <select class="form-input" id="cfg-plc-profile" style="background-color: #0c1424; color: #e2e8f0; border: 1px solid #1e293b; border-radius: 4px; padding: 8px;">
+                        <option value="localhost">Localhost Dev (127.0.0.1:5020)</option>
+                        <option value="router">Router Setup (192.168.1.5:502)</option>
+                        <option value="custom">Custom Configuration</option>
+                    </select>
+                </div>
+                <div class="form-group">
                     <label class="form-label" for="cfg-plc-ip">PLC IP Address</label>
                     <input class="form-input" type="text" id="cfg-plc-ip" placeholder="192.168.1.5">
                 </div>

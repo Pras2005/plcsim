@@ -128,6 +128,18 @@ def load_config() -> dict:
 config: dict = load_config()
 config_lock = threading.Lock()
 
+
+def save_config(cfg: dict):
+    """Save configuration to config.json on disk."""
+    try:
+        with config_lock:
+            data_to_save = json.loads(json.dumps(cfg))
+        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump(data_to_save, f, indent=2)
+        print(f"[INFO] Configuration saved to {CONFIG_PATH}")
+    except Exception as exc:
+        print(f"[WARN] Failed to save config to disk: {exc}")
+
 # ---------------------------------------------------------------------------
 # Machine simulation
 # ---------------------------------------------------------------------------
@@ -142,15 +154,31 @@ class Machine:
         # Offset cycle start so machines don't run in sync
         self.cycle = machine_id * 7
         self.cycle_count = 0
+        self.override_state = "auto"
 
     def tick(self) -> dict:
         """Advance one simulation cycle and return tag values."""
         # --- status bitfield ---
         power = 1
         auto = 1
-        cycle_running = 1 if (self.cycle % 30) < 20 else 0
-        estop = 0
-        alarm = 1 if random.randint(1, 100) <= 3 else 0
+        
+        if self.override_state == "active":
+            cycle_running = 1
+            estop = 0
+            alarm = 0
+        elif self.override_state == "stopped":
+            cycle_running = 0
+            estop = 1
+            alarm = 0
+        elif self.override_state == "idle":
+            cycle_running = 0
+            estop = 0
+            alarm = 0
+        else: # auto
+            cycle_running = 1 if (self.cycle % 30) < 20 else 0
+            estop = 0
+            alarm = 1 if random.randint(1, 100) <= 3 else 0
+            
         door = 0
 
         status_raw = (
@@ -168,15 +196,13 @@ class Machine:
             temperature = 45 + random.randint(-2, 2)
             vibration = 20 + random.randint(-3, 3)
             load = 75 + random.randint(-5, 5)
+            if self.cycle % 30 == 0:
+                self.cycle_count += 1
         else:
             speed = 0
-            temperature = 35
-            vibration = 3
-            load = 0
-
-        # --- cycle count ---
-        if self.cycle % 30 == 0:
-            self.cycle_count += 1
+            temperature = 35 + random.randint(-1, 1)
+            vibration = 2 + random.randint(-1, 1)
+            load = 10 + random.randint(-1, 1)  # ~10% standby load when machine is powered but idle
 
         tags = {
             "status": {
@@ -203,6 +229,7 @@ class Machine:
             "name": self.name,
             "tags": tags,
             "cycle": current_cycle,
+            "override_state": self.override_state,
         }
 
     def register_values(self) -> list[int]:
@@ -281,6 +308,24 @@ def get_modbus_client():
         return modbus_client
 
 
+def write_holding_registers_helper(client, address, values, device_id):
+    attempts = (
+        {"device_id": device_id},
+        {"slave": device_id},
+        {"unit": device_id},
+        {},
+    )
+    last_error = None
+    for kwargs in attempts:
+        try:
+            return client.write_registers(address=address, values=values, **kwargs)
+        except TypeError as exc:
+            last_error = exc
+    if last_error:
+        raise last_error
+    raise RuntimeError("Could not write registers")
+
+
 def write_modbus_registers(machine: Machine, data: dict):
     """Write a machine's tag values to Modbus registers."""
     client = get_modbus_client()
@@ -303,13 +348,73 @@ def write_modbus_registers(machine: Machine, data: dict):
             tags["cycle_count"],
         ]
 
-        client.write_registers(
-            address=base_addr,
-            values=values,
-            slave=device_id,
-        )
+        write_holding_registers_helper(client, base_addr, values, device_id)
     except Exception as exc:
-        print(f"[WARN] Modbus write failed for {machine.name}: {exc}")
+        print(f"[WARN] Modbus write failed for {machine.name}: {exc}. Resetting connection.")
+        with modbus_lock:
+            if modbus_client is not None:
+                try:
+                    modbus_client.close()
+                except Exception:
+                    pass
+                modbus_client = None
+
+
+# ---------------------------------------------------------------------------
+# Modbus server helpers (for localhost development)
+# ---------------------------------------------------------------------------
+
+modbus_server_thread = None
+modbus_server_running_on = None  # (ip, port)
+modbus_server_lock = threading.Lock()
+
+def check_and_start_modbus_server():
+    global modbus_server_thread, modbus_server_running_on
+    
+    with config_lock:
+        plc_cfg = config.get("plc", {})
+        enabled = plc_cfg.get("enabled", False)
+        ip = plc_cfg.get("ip", "192.168.1.5")
+        port = plc_cfg.get("port", 502)
+        
+    is_local = ip in ("127.0.0.1", "localhost", "0.0.0.0")
+    if not (enabled and is_local):
+        return
+        
+    current_addr = (ip, port)
+    with modbus_server_lock:
+        if modbus_server_running_on == current_addr:
+            return
+            
+        if modbus_server_running_on is not None:
+            print(f"[WARN] Modbus server already running on {modbus_server_running_on}. Restart the application to change port/IP.")
+            return
+
+        try:
+            from pymodbus.server import StartTcpServer
+            from pymodbus.datastore.context import SimDevice, DataType
+            from pymodbus.simulator.simdata import SimData
+        except ImportError as e:
+            print(f"[WARN] Cannot import pymodbus server classes: {e}. Local Modbus server disabled.")
+            return
+
+        # Create SimDevice with wildcard id=0 so it accepts any slave ID
+        simdata = SimData(address=0, count=1000, datatype=DataType.REGISTERS, values=[0]*1000)
+        device = SimDevice(id=0, simdata=simdata)
+        
+        def run_server():
+            global modbus_server_running_on
+            print(f"[INFO] Starting local Modbus TCP server on {ip}:{port}")
+            modbus_server_running_on = current_addr
+            try:
+                StartTcpServer(device, address=(ip, port))
+            except Exception as e:
+                print(f"[WARN] Modbus TCP server failed to start on {ip}:{port}: {e}")
+                with modbus_server_lock:
+                    modbus_server_running_on = None
+                
+        modbus_server_thread = threading.Thread(target=run_server, daemon=True)
+        modbus_server_thread.start()
 
 
 # ---------------------------------------------------------------------------
@@ -360,6 +465,7 @@ def build_config_payload() -> dict:
 
 def apply_config_update(data: dict):
     """Merge incoming config updates into the runtime config."""
+    global modbus_client
     with config_lock:
         if "machine_count" in data:
             config["simulator"]["machine_count"] = int(data["machine_count"])
@@ -378,6 +484,21 @@ def apply_config_update(data: dict):
 
     # Sync machine pool to new count
     sync_machines(config["simulator"]["machine_count"])
+
+    # Save to disk
+    save_config(config)
+
+    # Check/restart local Modbus server
+    check_and_start_modbus_server()
+
+    # Disconnect client to force reconnect on next loop iteration
+    with modbus_lock:
+        if modbus_client is not None:
+            try:
+                modbus_client.close()
+            except Exception:
+                pass
+            modbus_client = None
 
 
 # ---------------------------------------------------------------------------
@@ -427,6 +548,18 @@ def handle_update_config(data):
     apply_config_update(data)
     # Broadcast updated config to ALL connected clients
     socketio.emit("config_data", build_config_payload())
+
+
+@socketio.on("set_machine_state")
+def handle_set_machine_state(data):
+    """Set the override state of a machine."""
+    machine_id = int(data.get("machine_id", 0))
+    state_name = str(data.get("state", "auto")).lower()
+    
+    with machines_lock:
+        if 0 <= machine_id < len(machines):
+            machines[machine_id].override_state = state_name
+            print(f"[INFO] Set machine {machine_id} override state to {state_name}")
 
 
 # ---------------------------------------------------------------------------
@@ -518,7 +651,22 @@ def print_banner():
 ║  Tags         : {', '.join(tag_names):<37s}║
 ╚══════════════════════════════════════════════════════╝
 """
-    print(banner)
+    try:
+        print(banner)
+    except UnicodeEncodeError:
+        plain_banner = f"""
++------------------------------------------------------+
+|             PLC Multi-Machine Simulator              |
++------------------------------------------------------+
+  Machines     : {sim.get('machine_count', 1)}
+  Interval     : {sim.get('update_interval', 1.0)}s
+  Web Port     : {sim.get('web_port', 8080)}
+  PLC Enabled  : {str(plc.get('enabled', False))}
+  PLC Address  : {plc.get('ip', 'N/A')}:{plc.get('port', 502)}
+  Tags         : {', '.join(tag_names)}
++------------------------------------------------------+
+"""
+        print(plain_banner)
 
 
 # ---------------------------------------------------------------------------
@@ -551,6 +699,9 @@ if __name__ == "__main__":
 
     # Initialize machine pool
     sync_machines(config["simulator"].get("machine_count", 1))
+
+    # Start Modbus server if running in local mode
+    check_and_start_modbus_server()
 
     # Start background simulation thread
     sim_thread = threading.Thread(target=simulation_loop, daemon=True)
