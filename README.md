@@ -1,78 +1,67 @@
 # plcsim
 
-## Table of Contents
+A robust Python-based Industrial Machine Simulator that mimics PLC (Programmable Logic Controller) telemetry, featuring both a graphical desktop application and a web-based interface.
 
-- [Deep Dive Description](#deep-dive-description)
-- [Project Structure](#project-structure)
-- [Prerequisites](#prerequisites)
-- [Installation & Setup](#installation--setup)
-- [Usage / Running Locally](#usage--running-locally)
+## Overview
+`plcsim` generates realistic simulated data for industrial machinery (e.g., speed, temperature, vibration, load) and exposes this telemetry via Modbus TCP. It is designed to act as a mock data source for testing SCADA systems, HMI dashboards, or IIoT data pipelines. The project provides two separate frontends to control the simulation:
+1. **Web UI** (`simulator.py`): A Flask and Socket.IO based dashboard.
+2. **Desktop UI** (`simulator_gui.py`): A native desktop application built with `customtkinter`.
 
-## Deep Dive Description
-
-plcsim is a robust software engineering project carefully architected to provide scalable and efficient functionality. Built primarily in Python, this repository likely leverages modern frameworks to deliver high-performance backend processing, data analysis, or scripting utilities. Dependencies are managed via `requirements.txt`, ensuring reproducible environments. 
-
-The core functionality involves processing inputs, managing state or data persistence, and delivering outputs or serving API endpoints as dictated by the specific modular implementations found within the file tree. By breaking down the logic into distinct modules, the system ensures that each component handles a single responsibility, paving the way for easier testing and future feature expansions.
-
-## Project Structure
-
-```text
-plcsim/
-├── README.md
-├── config.json
-├── plc.py
-├── requirements.txt
-├── simulator.py
-├── simulator_gui.py
-├── static
-│   ├── css
-│   │   └── style.css
-│   └── js
-│       └── app.js
-└── templates
-    └── index.html
-
-```
+## Core Features and Domain Models
+- **Machine Simulation**: Simulates the state of industrial assets over time, generating analog variables (speed, temp, vibration) using sine waves, noise profiles, and physics-based momentum rules.
+- **State Machine**: Machines can be toggled between states (Auto, Manual, E-Stop, Alarm, Idle, Running).
+- **Modbus TCP Integration**: 
+  - **Client Mode**: Writes simulated registers to an external Modbus PLC.
+  - **Server Mode**: Hosts a local PyModbus TCP Server allowing external IIoT platforms to poll the simulator directly.
 
 ## Prerequisites
-
-Before you begin, ensure you have met the following requirements:
-- Python 3.8+
-- pip (Python package installer)
-- Virtualenv (recommended)
-- Git
+- Python 3.10+
+- `flask`, `flask_socketio`
+- `customtkinter`, `tkinter`
+- `pymodbus`
+- (All dependencies listed in `requirements.txt`)
 
 ## Installation & Setup
 
-Follow these step-by-step instructions to get a development environment running:
-
-1. **Clone the repository:**
+1. **Clone the repository**:
    ```bash
    git clone git@github.com:Pras2005/plcsim.git
    cd plcsim
    ```
 
-2. **Set up a virtual environment:**
-   ```bash
-   python -m venv venv
-   source venv/bin/activate  # On Windows use `venv\Scripts\activate`
-   ```
-
-3. **Install dependencies:**
+2. **Install Python dependencies**:
    ```bash
    pip install -r requirements.txt
    ```
 
-4. **Environment Variables:**
-   If there is a `.env.example` file, copy it to `.env` and configure the necessary keys:
-   ```bash
-   cp .env.example .env
-   ```
-
 ## Usage / Running Locally
 
-Start the application by running the main entry script:
+### Option 1: Web-based Simulator
+Start the Flask/Socket.IO web server:
 ```bash
-python main.py
+python simulator.py
 ```
-*(If the entry point is different, replace `main.py` with the appropriate script like `app.py` or run via Uvicorn/Flask)*
+- Access the web interface at: `http://127.0.0.1:5001`
+- Configure Modbus IP, update intervals, and machine count from the web UI.
+
+### Option 2: Desktop GUI Simulator
+Start the CustomTkinter desktop interface:
+```bash
+python simulator_gui.py
+```
+- A graphical window will open allowing direct manipulation of machines and monitoring of the integrated Modbus server.
+
+## Project Structure
+```text
+plcsim
+├── simulator.py         # Flask & Socket.IO web application entry point
+├── simulator_gui.py     # CustomTkinter desktop GUI entry point
+├── plc.py               # Core logic for machine simulation and Modbus mapping
+├── config.json          # Configuration file for machine tags and network settings
+├── requirements.txt     # Python dependencies
+├── static/              # Web UI static assets (CSS, JS)
+│   └── js/
+│       └── app.js       # WebSocket and UI updating logic for the web dashboard
+└── templates/           # Web UI HTML templates
+    └── index.html       # Main web dashboard layout
+```
